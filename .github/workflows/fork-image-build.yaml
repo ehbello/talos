@@ -1,87 +1,64 @@
-# Fork-only CI: builds the rockpi4c metal image from THIS fork's imager (which
-# carries the measured-DTB-in-UKI feature) + the sbc-rockchip overlay, on a
-# native arm64 runner. It does NOT use siderolabs self-hosted runners or remote
+# Fork-only CI: builds THIS fork's imager container -- which carries the
+# measured-DTB-in-UKI feature (a measured UKI .dtb section, overlay-supplied
+# device trees, dtc/fdtoverlay bundled) -- and PUSHES it to ghcr, on a native
+# arm64 runner. It does NOT use siderolabs self-hosted runners or remote
 # BuildKit, so it works on the fork.
 #
-# - Builds this fork's imager container (docker output, loaded locally). PKG_DTC
-#   is overridden to a PUBLISHED dtc pkg (provides fdtoverlay): the pinned PKGS
-#   predates the dtc package, and the Dockerfile default is `scratch`, so without
-#   this override the imager has no fdtoverlay and the DTB overlay merge fails.
-# - Runs the imager to assemble a metal image, pulling the STOCK upstream
-#   installer-base (kernel+initramfs are unchanged by this fork) and the
-#   sbc-rockchip overlay for the rockpi4c board bits.
-# - Uploads the resulting image as a workflow artifact.
+# Division of labour: CI builds the slow, per-repo images (this imager, and the
+# sbc-rockchip overlay in its own repo). The raw metal image to flash is then
+# assembled LOCALLY from the published imager + overlay (see siderolabs/build.sh)
+# as often as needed, without rebuilding anything here.
 #
-# Trigger with workflow_dispatch (preferred) or by pushing a `*-image-build`
-# branch. Keep this workflow OFF the PR branch feature/uki-dtb-section.
+# PKG_DTC is overridden to a PUBLISHED dtc pkg (provides fdtoverlay): the pinned
+# PKGS predates the dtc package and the Dockerfile default is `scratch`, so
+# without this the imager has no fdtoverlay and the DTB overlay merge fails.
+#
+# The pushed tag is `git describe` of the built commit, so a local build.sh on
+# that same commit resolves the same imager tag. Trigger with workflow_dispatch
+# (preferred) or by pushing a `*-image-build` branch. Keep this workflow OFF the
+# PR branch feature/uki-dtb-section.
 
-name: fork-image-build
+name: fork-imager-build
 
 "on":
   workflow_dispatch:
     inputs:
-      overlay_image:
-        description: "sbc-rockchip overlay image"
-        type: string
-        default: "ghcr.io/ehbello/sbc-rockchip:v0.2.1-8-g5773228"
-      overlay_name:
-        description: "overlay board name"
-        type: string
-        default: "rockpi4c"
-      base_installer_image:
-        description: "base installer image (kernel+initramfs)"
-        type: string
-        default: "ghcr.io/siderolabs/installer-base:v1.14.0-rc.2"
       pkg_dtc:
         description: "dtc pkg image providing fdtoverlay"
         type: string
         default: "ghcr.io/siderolabs/dtc:v1.15.0-alpha.0-13-gb6b2843"
-      uboot_variant:
-        description: "u-boot variant to install (empty = default; spi-tpm = external SPI TPM + measured boot)"
-        type: string
-        default: "spi-tpm"
   push:
     branches:
       - "**-image-build"
 
 concurrency:
-  group: fork-image-build-${{ github.ref }}
+  group: fork-imager-build-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  IMAGE_REGISTRY: ghcr.io
   USERNAME: ${{ github.repository_owner }}
   PLATFORM: linux/arm64
-  # Defaults for push-triggered runs; workflow_dispatch inputs override these.
-  OVERLAY_IMAGE: ghcr.io/ehbello/sbc-rockchip:v0.2.1-8-g5773228
-  OVERLAY_NAME: rockpi4c
-  BASE_INSTALLER_IMAGE: ghcr.io/siderolabs/installer-base:v1.14.0-rc.2
   PKG_DTC: ghcr.io/siderolabs/dtc:v1.15.0-alpha.0-13-gb6b2843
-  UBOOT_VARIANT: spi-tpm
 
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
-      packages: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
 
-      - name: Unshallow for git describe / SOURCE_DATE_EPOCH
+      - name: Unshallow for git describe
         run: git fetch --prune --unshallow || true
 
       - name: Resolve config
         id: cfg
         run: |
-          echo "overlay_image=${{ github.event.inputs.overlay_image || env.OVERLAY_IMAGE }}" >> "$GITHUB_OUTPUT"
-          echo "overlay_name=${{ github.event.inputs.overlay_name || env.OVERLAY_NAME }}" >> "$GITHUB_OUTPUT"
-          echo "base_installer_image=${{ github.event.inputs.base_installer_image || env.BASE_INSTALLER_IMAGE }}" >> "$GITHUB_OUTPUT"
           echo "pkg_dtc=${{ github.event.inputs.pkg_dtc || env.PKG_DTC }}" >> "$GITHUB_OUTPUT"
-          echo "uboot_variant=${{ github.event.inputs.uboot_variant || env.UBOOT_VARIANT }}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
@@ -96,50 +73,11 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build the fork imager (arm64, with fdtoverlay)
+      - name: Build and push the fork imager (arm64, with fdtoverlay)
         run: |
-          make docker-imager \
-            DEST=_out \
+          make imager \
+            PUSH=true \
             PLATFORM=linux/arm64 \
             USERNAME=${{ github.repository_owner }} \
             PKG_DTC=${{ steps.cfg.outputs.pkg_dtc }}
-
-      - name: Load the imager into docker
-        run: docker load -i _out/imager.tar
-
-      - name: Generate the rockpi4c metal image
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG=$(git describe --tag --always --dirty --match "v[0-9]*")
-          SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
-          echo "imager tag: ${TAG}"
-          # Select a u-boot variant (and its bundled kernel overlays) when set.
-          OVERLAY_OPTS=()
-          if [ -n "${{ steps.cfg.outputs.uboot_variant }}" ]; then
-            OVERLAY_OPTS+=(--overlay-option "uBootVariant=${{ steps.cfg.outputs.uboot_variant }}")
-          fi
-          docker run --rm -t \
-            --network=host \
-            --user "$(id -u):$(id -g)" \
-            -v "${PWD}/_out:/secureboot:ro" \
-            -v "${PWD}/_out:/out" \
-            -e GITHUB_TOKEN \
-            -e SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
-            -e DETERMINISTIC_SEED=1 \
-            "ghcr.io/${{ github.repository_owner }}/imager:${TAG}" metal \
-            --arch arm64 \
-            --base-installer-image "${{ steps.cfg.outputs.base_installer_image }}" \
-            --overlay-name "${{ steps.cfg.outputs.overlay_name }}" \
-            --overlay-image "${{ steps.cfg.outputs.overlay_image }}" \
-            "${OVERLAY_OPTS[@]}"
-          echo "=== _out contents ==="
-          ls -la _out
-
-      - name: Upload the rockpi4c image
-        uses: actions/upload-artifact@v4
-        with:
-          name: rockpi4c-metal-arm64
-          path: |
-            _out/metal-*
-          if-no-files-found: error
+          echo "pushed ghcr.io/${{ github.repository_owner }}/imager:$(git describe --tag --always --dirty --match 'v[0-9]*')"
