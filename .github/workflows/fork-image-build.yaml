@@ -13,6 +13,12 @@
 # PKGS predates the dtc package and the Dockerfile default is `scratch`, so
 # without this the imager has no fdtoverlay and the DTB overlay merge fails.
 #
+# PKG_KERNEL is overridden to a PUBLISHED fork kernel pkg carrying the rk3399
+# PCIe Tpvperl fix, without which the Penta SATA HAT (JMB585) wedges the board
+# in a reboot loop. That image is arm64-only, so INSTALLER_ARCH=targetarch is
+# mandatory here: the default `all` also instantiates
+# `FROM --platform=amd64 ${PKG_KERNEL}`, which has no amd64 variant to resolve.
+#
 # The pushed tag is `git describe` of the built commit, so a local build.sh on
 # that same commit resolves the same imager tag. Trigger with workflow_dispatch
 # (preferred) or by pushing a `*-image-build` branch. Keep this workflow OFF the
@@ -27,6 +33,10 @@ name: fork-imager-build
         description: "dtc pkg image providing fdtoverlay"
         type: string
         default: "ghcr.io/siderolabs/dtc:v1.15.0-alpha.0-13-gb6b2843"
+      pkg_kernel:
+        description: "kernel pkg image (fork build with the rk3399 PCIe fix)"
+        type: string
+        default: "ghcr.io/ehbello/kernel:v1.14.0-17-g2e806ee"
   push:
     branches:
       - "**-image-build"
@@ -39,6 +49,7 @@ env:
   USERNAME: ${{ github.repository_owner }}
   PLATFORM: linux/arm64
   PKG_DTC: ghcr.io/siderolabs/dtc:v1.15.0-alpha.0-13-gb6b2843
+  PKG_KERNEL: ghcr.io/ehbello/kernel:v1.14.0-17-g2e806ee
 
 jobs:
   build:
@@ -59,6 +70,7 @@ jobs:
         id: cfg
         run: |
           echo "pkg_dtc=${{ github.event.inputs.pkg_dtc || env.PKG_DTC }}" >> "$GITHUB_OUTPUT"
+          echo "pkg_kernel=${{ github.event.inputs.pkg_kernel || env.PKG_KERNEL }}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
@@ -78,6 +90,8 @@ jobs:
           make imager \
             PUSH=true \
             PLATFORM=linux/arm64 \
+            INSTALLER_ARCH=targetarch \
             USERNAME=${{ github.repository_owner }} \
-            PKG_DTC=${{ steps.cfg.outputs.pkg_dtc }}
+            PKG_DTC=${{ steps.cfg.outputs.pkg_dtc }} \
+            PKG_KERNEL=${{ steps.cfg.outputs.pkg_kernel }}
           echo "pushed ghcr.io/${{ github.repository_owner }}/imager:$(git describe --tag --always --dirty --match 'v[0-9]*')"
