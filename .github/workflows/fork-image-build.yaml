@@ -36,7 +36,7 @@ name: fork-imager-build
       pkg_kernel:
         description: "kernel pkg image (fork build with the rk3399 PCIe fix)"
         type: string
-        default: "ghcr.io/ehbello/kernel:v1.14.0-17-g2e806ee"
+        default: "ghcr.io/ehbello/kernel:v1.14.0-18-g8235fc0"
   push:
     branches:
       - "**-image-build"
@@ -49,7 +49,7 @@ env:
   USERNAME: ${{ github.repository_owner }}
   PLATFORM: linux/arm64
   PKG_DTC: ghcr.io/siderolabs/dtc:v1.15.0-alpha.0-13-gb6b2843
-  PKG_KERNEL: ghcr.io/ehbello/kernel:v1.14.0-17-g2e806ee
+  PKG_KERNEL: ghcr.io/ehbello/kernel:v1.14.0-18-g8235fc0
 
 jobs:
   build:
